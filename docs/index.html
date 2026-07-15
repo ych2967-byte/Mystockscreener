@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#1769e0">
+  <title>무료 일봉 주식 스크리너</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <h1>무료 일봉 주식 스크리너</h1>
+        <div class="subtitle">종가 기준 · 한국/미국 · 아이폰용</div>
+      </div>
+      <div id="freshness" class="freshness">데이터 확인 중…</div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" data-market="kr">한국주식</button>
+      <button class="tab" data-market="us">미국주식</button>
+    </div>
+
+    <section class="card">
+      <h2>종목 찾기</h2>
+      <input id="search" class="search" type="search" placeholder="종목명 또는 티커 검색">
+      <div class="grid" style="margin-top:10px">
+        <label class="field">시장
+          <select id="exchange">
+            <option value="all">전체</option>
+          </select>
+        </label>
+        <label class="field">조건 연결
+          <select id="logic">
+            <option value="and">선택 조건 모두 만족</option>
+            <option value="or">선택 조건 하나 이상 만족</option>
+          </select>
+        </label>
+        <label class="field">정렬
+          <select id="sort">
+            <option value="m1_desc">1개월 상승률 높은 순</option>
+            <option value="m3_desc">3개월 상승률 높은 순</option>
+            <option value="w1_desc">1주 상승률 높은 순</option>
+            <option value="day_desc">오늘 상승률 높은 순</option>
+            <option value="volume_desc">거래량 증가율 높은 순</option>
+            <option value="value_desc">거래대금 높은 순</option>
+            <option value="name_asc">종목명 가나다/ABC 순</option>
+          </select>
+        </label>
+        <label class="field">최대 표시
+          <select id="limit">
+            <option value="50">50개</option>
+            <option value="100" selected>100개</option>
+            <option value="300">300개</option>
+            <option value="99999">전체</option>
+          </select>
+        </label>
+      </div>
+      <div class="checks" style="margin-top:10px">
+        <label class="check"><input type="checkbox" id="showPreferred"><span><strong>우선주 포함</strong><small>기본값은 제외</small></span></label>
+        <label class="check"><input type="checkbox" id="showSpac"><span><strong>스팩 포함</strong><small>기본값은 제외</small></span></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>이동평균선 조건</h2>
+      <div class="checks">
+        <label class="check"><input type="checkbox" id="stack"><span><strong>전체 정배열</strong><small>5일선 &gt; 20일선 &gt; 50일선 &gt; 100일선 &gt; 200일선</small></span></label>
+        <label class="check"><input type="checkbox" id="ma5_20"><span><strong>5일선 &gt; 20일선</strong></span></label>
+        <label class="check"><input type="checkbox" id="ma20_50"><span><strong>20일선 &gt; 50일선</strong></span></label>
+        <label class="check"><input type="checkbox" id="ma50_100"><span><strong>50일선 &gt; 100일선</strong></span></label>
+        <label class="check"><input type="checkbox" id="ma100_200"><span><strong>100일선 &gt; 200일선</strong></span></label>
+        <label class="check"><input type="checkbox" id="above200"><span><strong>현재가 &gt; 200일선</strong></span></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>숫자 조건 <span style="font-weight:400;color:var(--muted)">비워두면 적용 안 됨</span></h2>
+      <div class="grid">
+        <label class="field">오늘 상승률 최소(%)<input id="minDay" inputmode="decimal" type="number" step="0.1" placeholder="예: 2"></label>
+        <label class="field">1주 상승률 최소(%)<input id="minW1" inputmode="decimal" type="number" step="0.1" placeholder="예: 5"></label>
+        <label class="field">1개월 상승률 최소(%)<input id="minM1" inputmode="decimal" type="number" step="0.1" placeholder="예: 10"></label>
+        <label class="field">3개월 상승률 최소(%)<input id="minM3" inputmode="decimal" type="number" step="0.1" placeholder="예: 20"></label>
+        <label class="field">거래량 증가율 최소(%)<input id="minVolume" inputmode="decimal" type="number" step="1" placeholder="예: 150"></label>
+        <label class="field">20일 신고가까지 거리 최대(%)<input id="maxHigh20" inputmode="decimal" type="number" step="0.1" placeholder="예: 3"></label>
+        <label class="field">20일선 이격률 최소(%)<input id="minGap20" inputmode="decimal" type="number" step="0.1" placeholder="예: 0"></label>
+        <label class="field">20일선 이격률 최대(%)<input id="maxGap20" inputmode="decimal" type="number" step="0.1" placeholder="예: 8"></label>
+      </div>
+      <div class="actions">
+        <button id="apply" class="primary">조건 적용</button>
+        <button id="reset" class="secondary">초기화</button>
+      </div>
+      <div class="help">상승률과 이동평균선은 마지막으로 확정된 종가를 기준으로 계산합니다. 무료 공개 데이터이므로 투자 주문 전에는 증권사 화면에서 가격을 다시 확인하세요.</div>
+    </section>
+
+    <div class="summary"><strong id="count">0종목</strong><span id="notice" class="subtitle"></span></div>
+    <div id="status" class="status">데이터를 불러오는 중입니다.</div>
+
+    <div id="tableWrap" class="table-wrap" hidden>
+      <table>
+        <thead><tr><th>종목</th><th>시장</th><th>종가</th><th>오늘</th><th>1주</th><th>1개월</th><th>3개월</th><th>거래량</th><th>20일선 이격</th><th>20일 고점 거리</th><th>정배열</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div id="mobileCards" class="mobile-cards" hidden></div>
+  </main>
+<script src="app.js"></script>
+</body>
+</html>

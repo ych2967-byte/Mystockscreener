@@ -1,0 +1,9 @@
+{
+  "market": "US",
+  "updated_at": null,
+  "price_date": null,
+  "status": "waiting",
+  "message": "GitHub Actions에서 미국 데이터 갱신을 한 번 실행해주세요.",
+  "failed_count": 0,
+  "stocks": []
+}
