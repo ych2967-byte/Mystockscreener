@@ -68,30 +68,95 @@ def is_preferred_kr(name: str) -> bool:
     return bool(re.search(r"(우|우B|우C|우선주|\d우)$", name.replace(" ", "")))
 
 
-def get_kr_listing() -> list[Stock]:
-    """네이버 금융의 시장별 종목 목록을 읽는다. API 키 불필요."""
+def get_json(url: str, retries: int = 3, timeout: int = 30) -> object:
+    """로그인 없이 공개된 읽기 전용 JSON을 가져온다."""
+    last: Exception | None = None
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://stock.naver.com/",
+    }
+    for attempt in range(1, retries + 1):
+        try:
+            response = SESSION.get(url, timeout=timeout, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            last = exc
+            log(f"JSON 요청 실패 ({attempt}/{retries}): {url} / {exc}")
+            time.sleep(attempt * 2)
+    raise RuntimeError(f"JSON을 가져오지 못했습니다: {url}") from last
+
+
+def _stock_rows(payload: object) -> list[dict[str, object]]:
+    """응답 구조가 조금 바뀌어도 종목코드가 든 행을 재귀적으로 찾는다."""
+    rows: list[dict[str, object]] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            code = next(
+                (
+                    value.get(key)
+                    for key in ("itemCode", "stockCode", "symbolCode", "code")
+                    if value.get(key) is not None
+                ),
+                None,
+            )
+            code_text = re.sub(r"\D", "", str(code or ""))
+            if len(code_text) == 6:
+                rows.append(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(payload)
+    return rows
+
+
+def _row_name(row: dict[str, object], code: str) -> str:
+    for key in ("stockName", "itemName", "korName", "name"):
+        value = row.get(key)
+        if value and str(value).strip():
+            return str(value).strip()
+    return code
+
+
+def get_kr_listing_naver() -> list[Stock]:
+    """새 네이버증권의 공개 읽기 전용 목록 API를 사용한다."""
     stocks: list[Stock] = []
-    for sosok, exchange in (("0", "KOSPI"), ("1", "KOSDAQ")):
+    page_size = 100
+    for market_type, exchange, suffix in (
+        ("KOSPI", "KOSPI", "KS"),
+        ("KOSDAQ", "KOSDAQ", "KQ"),
+    ):
         seen: set[str] = set()
-        empty_pages = 0
-        for page in range(1, 81):
-            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-            html = get_text(url)
-            soup = BeautifulSoup(html, "html.parser")
-            page_count = 0
-            for anchor in soup.select("a.tltle"):
-                match = re.search(r"code=(\d{6})", anchor.get("href", ""))
-                if not match:
-                    continue
-                code = match.group(1)
-                if code in seen:
+        for start_idx in range(0, 5000, page_size):
+            url = (
+                "https://stock.naver.com/api/domestic/market/stock/default"
+                f"?tradeType=KRX&marketType={market_type}&orderType=marketSum"
+                f"&startIdx={start_idx}&pageSize={page_size}"
+            )
+            payload = get_json(url)
+            rows = _stock_rows(payload)
+            added = 0
+            for row in rows:
+                raw_code = next(
+                    (
+                        row.get(key)
+                        for key in ("itemCode", "stockCode", "symbolCode", "code")
+                        if row.get(key) is not None
+                    ),
+                    "",
+                )
+                code = re.sub(r"\D", "", str(raw_code))
+                if len(code) != 6 or code in seen:
                     continue
                 seen.add(code)
-                name = anchor.get_text(" ", strip=True)
-                ticker = f"{code}.{'KS' if exchange == 'KOSPI' else 'KQ'}"
+                name = _row_name(row, code)
                 stocks.append(
                     Stock(
-                        ticker=ticker,
+                        ticker=f"{code}.{suffix}",
                         name=name,
                         exchange=exchange,
                         market="KR",
@@ -99,15 +164,73 @@ def get_kr_listing() -> list[Stock]:
                         spac="스팩" in name,
                     )
                 )
-                page_count += 1
-            log(f"{exchange} 목록 {page}페이지: {page_count}개")
-            if page_count == 0:
-                empty_pages += 1
-                if empty_pages >= 2:
-                    break
-            else:
-                empty_pages = 0
-            time.sleep(0.15)
+                added += 1
+            log(f"{exchange} 목록 {start_idx // page_size + 1}페이지: {added}개")
+            if added == 0:
+                break
+            time.sleep(0.2)
+    return stocks
+
+
+def get_kr_listing_kind() -> list[Stock]:
+    """네이버 목록이 막힐 때 KRX KIND 상장법인 목록을 예비로 사용한다."""
+    url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+    html = get_text(url, retries=3, timeout=60)
+    tables = pd.read_html(StringIO(html), header=0)
+    if not tables:
+        return []
+    df = normalize_columns(max(tables, key=len))
+    columns = {str(c).replace(" ", "").strip(): c for c in df.columns}
+    code_col = next((columns[x] for x in ("종목코드", "단축코드") if x in columns), None)
+    name_col = next((columns[x] for x in ("회사명", "종목명") if x in columns), None)
+    market_col = next((columns[x] for x in ("시장구분", "시장") if x in columns), None)
+    if code_col is None or name_col is None or market_col is None:
+        raise RuntimeError("KRX KIND 목록에서 필요한 열을 찾지 못했습니다.")
+
+    stocks: list[Stock] = []
+    seen: set[str] = set()
+    for _, row in df.iterrows():
+        code = re.sub(r"\D", "", str(row[code_col])).zfill(6)[-6:]
+        name = str(row[name_col]).strip()
+        market_text = str(row[market_col]).strip()
+        if len(code) != 6 or code in seen or not name or name.lower() == "nan":
+            continue
+        if "코스닥" in market_text:
+            exchange, suffix = "KOSDAQ", "KQ"
+        elif "유가" in market_text or "코스피" in market_text:
+            exchange, suffix = "KOSPI", "KS"
+        else:
+            continue
+        seen.add(code)
+        stocks.append(
+            Stock(
+                ticker=f"{code}.{suffix}",
+                name=name,
+                exchange=exchange,
+                market="KR",
+                preferred=is_preferred_kr(name),
+                spac="스팩" in name,
+            )
+        )
+    log(f"KRX KIND 예비 목록: {len(stocks)}개")
+    return stocks
+
+
+def get_kr_listing() -> list[Stock]:
+    """한국 종목 목록. 새 네이버 API → KRX KIND 순서로 시도한다."""
+    stocks: list[Stock] = []
+    try:
+        stocks = get_kr_listing_naver()
+    except Exception as exc:
+        log(f"네이버 새 목록 API 실패: {exc}")
+
+    if len(stocks) < 500:
+        log(f"네이버 목록이 {len(stocks)}개뿐이라 KRX KIND 예비 목록을 사용합니다.")
+        try:
+            stocks = get_kr_listing_kind()
+        except Exception as exc:
+            log(f"KRX KIND 예비 목록 실패: {exc}")
+
     if len(stocks) < 500:
         raise RuntimeError(f"한국 종목 목록이 지나치게 적습니다: {len(stocks)}개")
     return stocks
