@@ -1,4 +1,4 @@
-name: 주식 데이터 자동 갱신
+name: 주식 데이터 자동 갱신 및 사이트 배포
 
 on:
   workflow_dispatch:
@@ -11,9 +11,11 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
-  group: stock-data-update
+  group: stock-data-and-pages
   cancel-in-progress: false
 
 jobs:
@@ -23,12 +25,12 @@ jobs:
 
     steps:
       - name: 파일 불러오기
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: 파이썬 준비
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -52,3 +54,26 @@ jobs:
           git add docs/data/kr.json docs/data/us.json
           git diff --cached --quiet || git commit -m "주식 데이터 자동 갱신"
           git push || (git pull --rebase && git push)
+
+      - name: GitHub Pages 준비
+        if: always()
+        uses: actions/configure-pages@v6
+
+      - name: 사이트 파일 묶기
+        if: always()
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./docs
+
+  deploy:
+    needs: update
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 사이트 공개
+        id: deployment
+        uses: actions/deploy-pages@v5
