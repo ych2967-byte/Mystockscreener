@@ -1,0 +1,54 @@
+name: 주식 데이터 자동 갱신
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 한국주식: 한국시간 평일 오후 5시 37분
+    - cron: "37 8 * * 1-5"
+
+    # 미국주식: 한국시간 화~토 오전 8시 7분
+    - cron: "7 23 * * 1-5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stock-data-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 파일 불러오기
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 파이썬 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 필요한 도구 설치
+        run: pip install -r requirements.txt
+
+      - name: 한국주식 데이터 갱신
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '37 8 * * 1-5' }}
+        run: python scripts/update_data.py --market kr --batch-size 40 --pause 1.5
+
+      - name: 미국주식 데이터 갱신
+        if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '7 23 * * 1-5') }}
+        run: python scripts/update_data.py --market us --batch-size 50 --pause 1.2
+
+      - name: 결과 저장
+        if: always()
+        run: |
+          git config user.name "stock-screener-bot"
+          git config user.email "stock-screener-bot@users.noreply.github.com"
+          git add docs/data/kr.json docs/data/us.json
+          git diff --cached --quiet || git commit -m "주식 데이터 자동 갱신"
+          git push || (git pull --rebase && git push)
