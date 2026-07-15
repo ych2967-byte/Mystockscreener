@@ -17,10 +17,16 @@ jobs:
       - name: Get repository files
         uses: actions/checkout@v4
 
-      - name: Unpack ZIP
+      - name: Unpack normal files
         run: |
           unzip -o stock-screener-iphone-v1.zip
-          cp -R stock-screener-iphone/. .
+          cp -R stock-screener-iphone/docs .
+          cp -R stock-screener-iphone/scripts .
+          cp stock-screener-iphone/requirements.txt .
+          cp stock-screener-iphone/.gitignore .
+          cp stock-screener-iphone/README.md .
+          cp stock-screener-iphone/START_HERE_IPHONE.md .
+          cp stock-screener-iphone/LICENSE .
           rm -rf stock-screener-iphone
 
       - name: Save unpacked files
