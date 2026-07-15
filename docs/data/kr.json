@@ -1,9 +1,1 @@
-{
-  "market": "KR",
-  "updated_at": null,
-  "price_date": null,
-  "status": "waiting",
-  "message": "GitHub Actions에서 한국 데이터 갱신을 한 번 실행해주세요.",
-  "failed_count": 0,
-  "stocks": []
-}
+{"market":"KR","updated_at":null,"price_date":null,"status":"error","message":"자동 갱신 실패: 한국 종목 목록이 지나치게 적습니다: 0개","failed_count":0,"stocks":[],"last_attempt_at":"2026-07-15T21:54:04.008627+00:00"}
