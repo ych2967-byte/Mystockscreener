@@ -43,6 +43,9 @@ class Stock:
     indexes: tuple[str, ...] = ()
     preferred: bool = False
     spac: bool = False
+    asset_type: str = "stock"
+    leveraged: bool = False
+    inverse: bool = False
 
 
 def log(message: str) -> None:
@@ -319,19 +322,104 @@ def get_nasdaq100() -> list[Stock]:
     return [Stock(t, t, "US", "US", ("NASDAQ100",)) for t in NASDAQ100_FALLBACK]
 
 
+def _parse_pipe_file(url: str) -> pd.DataFrame:
+    text = get_text(url, retries=4, timeout=60)
+    lines = [line for line in text.splitlines() if line and not line.startswith("File Creation Time")]
+    return pd.read_csv(StringIO("\n".join(lines)), sep="|")
+
+
+def _is_excluded_us_security(name: str, symbol: str) -> bool:
+    text = f"{name} {symbol}".upper()
+    blocked = (
+        " WARRANT", " WARRANTS", " WTS", " UNIT", " UNITS", " RIGHT", " RIGHTS",
+        " PREFERRED", " PFD", " DEBENTURE", " NOTE DUE", " BOND", " BENEFICIAL INTEREST",
+    )
+    if any(word in text for word in blocked):
+        return True
+    # Nasdaq 특수기호: ^ 우선주, + 권리, = 유닛 등
+    if any(ch in symbol for ch in ("^", "+", "=")):
+        return True
+    return False
+
+
+def _etf_flags(name: str) -> tuple[bool, bool]:
+    text = name.upper()
+    leveraged_words = ("2X", "3X", "ULTRA", "BULL 2", "BULL 3", "LEVERAGED")
+    inverse_words = ("INVERSE", "SHORT", "BEAR", "-1X", "-2X", "-3X")
+    return any(w in text for w in leveraged_words), any(w in text for w in inverse_words)
+
+
+def get_us_full_listing() -> list[Stock]:
+    """Nasdaq Trader 공식 심볼 목록에서 미국 일반주와 ETF 전체를 만든다."""
+    urls = (
+        "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+        "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
+    )
+    nasdaq = _parse_pipe_file(urls[0])
+    other = _parse_pipe_file(urls[1])
+    index_members: dict[str, set[str]] = {}
+    try:
+        for stock in get_sp500() + get_nasdaq100():
+            index_members.setdefault(stock.ticker, set()).update(stock.indexes)
+    except Exception as exc:
+        log(f"지수 구성종목 표시는 생략합니다: {exc}")
+
+    stocks: dict[str, Stock] = {}
+
+    def add(symbol: object, name: object, exchange: str, etf_value: object, test_value: object = "N", status_value: object = "N") -> None:
+        raw = str(symbol).strip()
+        sec_name = str(name).strip()
+        if not raw or raw.lower() == "nan" or raw == "Symbol":
+            return
+        if str(test_value).strip().upper() == "Y":
+            return
+        # 금융상태가 정상(N) 아닌 종목은 데이터 오류 가능성이 높아 제외
+        status = str(status_value).strip().upper()
+        if status not in ("", "N", "NAN"):
+            return
+        ticker = raw.replace(".", "-")
+        is_etf = str(etf_value).strip().upper() == "Y"
+        if not is_etf and _is_excluded_us_security(sec_name, raw):
+            return
+        leveraged, inverse = _etf_flags(sec_name) if is_etf else (False, False)
+        indexes = tuple(sorted(index_members.get(ticker, set())))
+        stocks[ticker] = Stock(
+            ticker=ticker,
+            name=sec_name or ticker,
+            exchange=exchange,
+            market="US",
+            indexes=indexes,
+            asset_type="etf" if is_etf else "stock",
+            leveraged=leveraged,
+            inverse=inverse,
+        )
+
+    for _, row in nasdaq.iterrows():
+        add(
+            row.get("Symbol"), row.get("Security Name"), "NASDAQ", row.get("ETF"),
+            row.get("Test Issue"), row.get("Financial Status"),
+        )
+
+    exchange_map = {
+        "A": "NYSE American", "N": "NYSE", "P": "NYSE Arca",
+        "Z": "Cboe BZX", "V": "IEX", "Q": "NASDAQ",
+    }
+    for _, row in other.iterrows():
+        code = str(row.get("Exchange", "")).strip().upper()
+        add(
+            row.get("ACT Symbol"), row.get("Security Name"), exchange_map.get(code, code or "US"),
+            row.get("ETF"), row.get("Test Issue"), "N",
+        )
+
+    if len(stocks) < 3000:
+        raise RuntimeError(f"미국 전체 종목 목록이 지나치게 적습니다: {len(stocks)}개")
+    etfs = sum(1 for x in stocks.values() if x.asset_type == "etf")
+    log(f"미국 전체 목록: {len(stocks)}개 (ETF {etfs}개 포함)")
+    return sorted(stocks.values(), key=lambda x: x.ticker)
+
+
 def get_us_listing() -> list[Stock]:
-    merged: dict[str, Stock] = {}
-    for stock in get_sp500() + get_nasdaq100():
-        old = merged.get(stock.ticker)
-        if old:
-            indexes = tuple(sorted(set(old.indexes + stock.indexes)))
-            name = old.name if old.name != old.ticker else stock.name
-            merged[stock.ticker] = Stock(stock.ticker, name, "US", "US", indexes)
-        else:
-            merged[stock.ticker] = stock
-    if len(merged) < 450:
-        raise RuntimeError(f"미국 종목 목록이 지나치게 적습니다: {len(merged)}개")
-    return list(merged.values())
+    return get_us_full_listing()
 
 
 def chunks(items: list[Stock], size: int) -> Iterable[list[Stock]]:
@@ -374,8 +462,16 @@ def finite(value: object, digits: int = 4) -> float | None:
 def trailing_return(close: pd.Series, periods: int) -> float | None:
     if len(close) <= periods:
         return None
-    base = close.iloc[-periods - 1]
-    return finite((close.iloc[-1] / base - 1) * 100) if base else None
+    window = close.iloc[-periods - 1:]
+    # 티커 재사용·합병 등으로 하루 가격이 비정상적으로 단절된 구간은 수익률을 숨긴다.
+    daily = window.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    if not daily.empty and (daily.abs() > 0.70).any():
+        return None
+    base = window.iloc[0]
+    value = finite((window.iloc[-1] / base - 1) * 100) if base else None
+    if value is not None and abs(value) > 1000:
+        return None
+    return value
 
 
 def compute(stock: Stock, history: pd.DataFrame) -> dict[str, object] | None:
@@ -401,6 +497,9 @@ def compute(stock: Stock, history: pd.DataFrame) -> dict[str, object] | None:
         "indexes": list(stock.indexes),
         "preferred": stock.preferred,
         "spac": stock.spac,
+        "asset_type": stock.asset_type,
+        "leveraged": stock.leveraged,
+        "inverse": stock.inverse,
         "date": close.index[-1].strftime("%Y-%m-%d"),
         "close": finite(latest, 3),
         "day": trailing_return(close, 1),
