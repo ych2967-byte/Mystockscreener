@@ -6,15 +6,15 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="theme-color" content="#1769e0">
-  <title>무료 일봉 주식 스크리너</title>
+  <title>무료 일봉 주식 스크리너 V2</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main class="app">
     <header>
       <div>
-        <h1>무료 일봉 주식 스크리너</h1>
-        <div class="subtitle">종가 기준 · 한국/미국 · 아이폰용</div>
+        <h1>무료 일봉 주식 스크리너 V2</h1>
+        <div class="subtitle">종가 기준 · 미국 전체 일반주와 ETF 포함 · 아이폰용</div>
       </div>
       <div id="freshness" class="freshness">데이터 확인 중…</div>
     </header>
@@ -31,6 +31,13 @@
         <label class="field">시장
           <select id="exchange">
             <option value="all">전체</option>
+          </select>
+        </label>
+        <label class="field" id="assetField" hidden>종류
+          <select id="assetType">
+            <option value="all">일반주 + ETF</option>
+            <option value="stock">일반주만</option>
+            <option value="etf">ETF만</option>
           </select>
         </label>
         <label class="field">조건 연결
@@ -59,9 +66,13 @@
           </select>
         </label>
       </div>
-      <div class="checks" style="margin-top:10px">
+      <div id="krOptions" class="checks" style="margin-top:10px">
         <label class="check"><input type="checkbox" id="showPreferred"><span><strong>우선주 포함</strong><small>기본값은 제외</small></span></label>
         <label class="check"><input type="checkbox" id="showSpac"><span><strong>스팩 포함</strong><small>기본값은 제외</small></span></label>
+      </div>
+      <div id="usOptions" class="checks" style="margin-top:10px" hidden>
+        <label class="check"><input type="checkbox" id="showLeveraged"><span><strong>레버리지 ETF 포함</strong><small>기본값은 제외</small></span></label>
+        <label class="check"><input type="checkbox" id="showInverse"><span><strong>인버스 ETF 포함</strong><small>기본값은 제외</small></span></label>
       </div>
     </section>
 
@@ -93,7 +104,7 @@
         <button id="apply" class="primary">조건 적용</button>
         <button id="reset" class="secondary">초기화</button>
       </div>
-      <div class="help">상승률과 이동평균선은 마지막으로 확정된 종가를 기준으로 계산합니다. 무료 공개 데이터이므로 투자 주문 전에는 증권사 화면에서 가격을 다시 확인하세요.</div>
+      <div class="help">상승률과 이동평균선은 마지막으로 확정된 종가를 기준으로 계산합니다. 티커 재사용·합병 등으로 하루 가격이 70% 넘게 단절된 구간은 상승률을 표시하지 않습니다. 무료 공개 데이터이므로 투자 주문 전에는 증권사 화면에서 가격을 다시 확인하세요.</div>
     </section>
 
     <div class="summary"><strong id="count">0종목</strong><span id="notice" class="subtitle"></span></div>
