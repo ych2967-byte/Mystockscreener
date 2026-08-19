@@ -52,6 +52,7 @@ jobs:
           git config user.name "stock-screener-bot"
           git config user.email "stock-screener-bot@users.noreply.github.com"
           git add docs/data/kr.json docs/data/us.json
+          if [ -f docs/data/us_sizes.json ]; then git add docs/data/us_sizes.json; fi
           git diff --cached --quiet || git commit -m "주식 데이터 자동 갱신"
           git push || (git pull --rebase && git push)
 
