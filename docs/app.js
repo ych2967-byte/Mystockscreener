@@ -1,13 +1,15 @@
 const $ = id => document.getElementById(id);
 const state = { market: 'kr', data: [], meta: {} };
 const boolIds = ['stack','ma5_20','ma20_50','ma50_100','ma100_200','above200'];
-const numberIds = ['minDay','minW1','minM1','minM3','minVolume','maxHigh20','minGap20','maxGap20'];
+const numberIds = ['minDay','minW1','minM1','minM3','minVolume','maxHigh20','minGap20','maxGap20','minCap','maxCap'];
 
 function num(id) { const v=$(id).value.trim(); return v==='' ? null : Number(v); }
 function pct(v) { return v==null ? '-' : `${v>=0?'+':''}${Number(v).toFixed(1)}%`; }
 function cls(v) { return v==null ? '' : v>0 ? 'pos' : v<0 ? 'neg' : ''; }
 function money(v, market) { if(v==null)return '-'; return market==='KR' ? `${Math.round(v).toLocaleString()}원` : `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:2})}`; }
-function compact(v, market) { if(v==null)return '-'; const unit=market==='KR'?'원':'$'; if(v>=1e12)return `${(v/1e12).toFixed(1)}조${unit}`; if(v>=1e9)return `${(v/1e9).toFixed(1)}B${unit}`; if(v>=1e6)return `${(v/1e6).toFixed(1)}M${unit}`; return `${Math.round(v).toLocaleString()}${unit}`; }
+function compact(v, market) { if(v==null)return '-'; if(market==='KR'){if(v>=1e12)return `${(v/1e12).toFixed(1)}조원`;if(v>=1e8)return `${(v/1e8).toFixed(v>=1e10?0:1)}억원`;return `${Math.round(v).toLocaleString()}원`;} if(v>=1e12)return `$${(v/1e12).toFixed(1)}T`; if(v>=1e9)return `$${(v/1e9).toFixed(1)}B`; if(v>=1e6)return `$${(v/1e6).toFixed(1)}M`; return `$${Math.round(v).toLocaleString()}`; }
+function capInputToRaw(v){ if(v==null)return null; return state.market==='kr' ? v*1e8 : v*1e9; }
+function sizeLabel(s){ return s.asset_type==='etf' ? '순자산' : '시총'; }
 function assetLabel(s) { if(s.asset_type==='etf') return s.leveraged?'레버리지 ETF':s.inverse?'인버스 ETF':'ETF'; return '일반주'; }
 function escapeHtml(x){ return String(x??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 
@@ -26,6 +28,9 @@ function matchesConditions(s) {
   boolIds.forEach(id=>{if($(id).checked)tests.push(!!s[id]);});
   const map=[['minDay','day','min'],['minW1','w1','min'],['minM1','m1','min'],['minM3','m3','min'],['minVolume','volume_ratio','min'],['maxHigh20','high20_distance','max'],['minGap20','gap20','min'],['maxGap20','gap20','max']];
   map.forEach(([id,key,mode])=>{const n=num(id); if(n!=null)tests.push(s[key]!=null && (mode==='min'?s[key]>=n:s[key]<=n));});
+  const minCap=capInputToRaw(num('minCap')), maxCap=capInputToRaw(num('maxCap'));
+  if(minCap!=null)tests.push(s.size_value!=null && s.size_value>=minCap);
+  if(maxCap!=null)tests.push(s.size_value!=null && s.size_value<=maxCap);
   if(!tests.length)return true;
   return $('logic').value==='or' ? tests.some(Boolean) : tests.every(Boolean);
 }
@@ -43,7 +48,7 @@ function filtered(){
     }
     return matchesConditions(s);
   });
-  const [key,dir]=$('sort').value.split('_'); const k={day:'day',w1:'w1',m1:'m1',m3:'m3',volume:'volume_ratio',value:'value_traded',name:'name'}[key];
+  const [key,dir]=$('sort').value.split('_'); const k={day:'day',w1:'w1',m1:'m1',m3:'m3',volume:'volume_ratio',value:'value_traded',cap:'size_value',name:'name'}[key];
   rows.sort((a,b)=>{ if(k==='name')return String(a.name).localeCompare(String(b.name)); const av=a[k]??-Infinity,bv=b[k]??-Infinity; return dir==='asc'?av-bv:bv-av; });
   return rows;
 }
@@ -58,14 +63,38 @@ function populateExchange(){
 function updateMarketControls(){
   $('krOptions').hidden=state.market!=='kr'; $('usOptions').hidden=state.market!=='us';
   $('assetField').hidden=state.market!=='us';
+  const isKr=state.market==='kr';
+  $('capUnitMin').textContent=isKr?'억원':'$B';
+  $('capUnitMax').textContent=isKr?'억원':'$B';
+  $('minCap').placeholder=isKr?'예: 5000':'예: 1';
+  $('maxCap').placeholder='비워두면 제한 없음';
+  $('capMinHelp').textContent=isKr?'예: 5000 = 5,000억원':'예: 1 = 10억 달러, 0.5 = 5억 달러';
+  $('capMaxHelp').textContent=isKr?'예: 50000 = 5조원':'예: 100 = 1,000억 달러';
+  renderCapQuickButtons();
+}
+
+function renderCapQuickButtons(){
+  const presets=state.market==='kr'
+    ? [[1000,'1,000억+'],[5000,'5,000억+'],[10000,'1조+'],[50000,'5조+']]
+    : [[0.5,'$0.5B+'],[1,'$1B+'],[5,'$5B+'],[10,'$10B+']];
+  $('capQuick').innerHTML=presets.map(([value,label])=>`<button type="button" class="quick-cap" data-cap="${value}">${label}</button>`).join('')+'<button type="button" class="quick-cap clear-cap" data-cap="">제한 해제</button>';
+  $('capQuick').querySelectorAll('.quick-cap').forEach(btn=>btn.addEventListener('click',()=>{
+    $('minCap').value=btn.dataset.cap;
+    render();
+  }));
 }
 function render(){
+  const minCap=num('minCap'), maxCap=num('maxCap');
+  const capErr=$('capError');
+  if(minCap!=null && minCap<0 || maxCap!=null && maxCap<0){capErr.hidden=false;capErr.textContent='시총은 0 이상 숫자로 입력해 주세요.';return;}
+  if(minCap!=null && maxCap!=null && minCap>maxCap){capErr.hidden=false;capErr.textContent='최소 시총이 최대 시총보다 큽니다.';return;}
+  capErr.hidden=true;capErr.textContent='';
   saveSettings(); const all=filtered(); const rows=all.slice(0,Number($('limit').value));
   $('count').textContent=`${all.length.toLocaleString()}종목`;
   $('notice').textContent=all.length>rows.length?`상위 ${rows.length.toLocaleString()}개 표시`:'';
   const has=state.data.length>0; $('status').hidden=has; $('tableWrap').hidden=!has; $('mobileCards').hidden=!has; if(!has)return;
-  $('tbody').innerHTML=rows.map(s=>`<tr><td><div class="name">${escapeHtml(s.name)}</div><div class="ticker">${escapeHtml(s.ticker)}</div></td><td>${escapeHtml(s.exchange)}<div class="ticker">${assetLabel(s)}</div></td><td>${money(s.close,s.market)}</td><td class="${cls(s.day)}">${pct(s.day)}</td><td class="${cls(s.w1)}">${pct(s.w1)}</td><td class="${cls(s.m1)}">${pct(s.m1)}</td><td class="${cls(s.m3)}">${pct(s.m3)}</td><td>${s.volume_ratio==null?'-':`${Number(s.volume_ratio).toFixed(0)}%`}<div class="ticker">${compact(s.value_traded,s.market)}</div></td><td class="${cls(s.gap20)}">${pct(s.gap20)}</td><td>${s.high20_distance==null?'-':`${Number(s.high20_distance).toFixed(1)}%`}</td><td><span class="badge ${s.stack?'good':''}">${s.stack?'정배열':'-'}</span></td></tr>`).join('');
-  $('mobileCards').innerHTML=rows.map(s=>`<article class="stock-card"><div class="stock-head"><div><div class="name">${escapeHtml(s.name)}</div><div class="ticker">${escapeHtml(s.ticker)} · ${escapeHtml(s.exchange)} · ${assetLabel(s)}</div></div><div style="text-align:right"><b>${money(s.close,s.market)}</b><div class="${cls(s.day)}">${pct(s.day)}</div></div></div><div class="stock-grid"><div class="metric"><span>1주</span><b class="${cls(s.w1)}">${pct(s.w1)}</b></div><div class="metric"><span>1개월</span><b class="${cls(s.m1)}">${pct(s.m1)}</b></div><div class="metric"><span>3개월</span><b class="${cls(s.m3)}">${pct(s.m3)}</b></div><div class="metric"><span>거래량</span><b>${s.volume_ratio==null?'-':`${Number(s.volume_ratio).toFixed(0)}%`}</b></div><div class="metric"><span>20일선 이격</span><b class="${cls(s.gap20)}">${pct(s.gap20)}</b></div><div class="metric"><span>배열</span><b>${s.stack?'정배열':'-'}</b></div></div></article>`).join('');
+  $('tbody').innerHTML=rows.map(s=>`<tr><td><div class="name">${escapeHtml(s.name)}</div><div class="ticker">${escapeHtml(s.ticker)}</div></td><td>${escapeHtml(s.exchange)}<div class="ticker">${assetLabel(s)}</div></td><td>${money(s.close,s.market)}</td><td>${compact(s.size_value,s.market)}<div class="ticker">${sizeLabel(s)}</div></td><td class="${cls(s.day)}">${pct(s.day)}</td><td class="${cls(s.w1)}">${pct(s.w1)}</td><td class="${cls(s.m1)}">${pct(s.m1)}</td><td class="${cls(s.m3)}">${pct(s.m3)}</td><td>${s.volume_ratio==null?'-':`${Number(s.volume_ratio).toFixed(0)}%`}<div class="ticker">${compact(s.value_traded,s.market)}</div></td><td class="${cls(s.gap20)}">${pct(s.gap20)}</td><td>${s.high20_distance==null?'-':`${Number(s.high20_distance).toFixed(1)}%`}</td><td><span class="badge ${s.stack?'good':''}">${s.stack?'정배열':'-'}</span></td></tr>`).join('');
+  $('mobileCards').innerHTML=rows.map(s=>`<article class="stock-card"><div class="stock-head"><div><div class="name">${escapeHtml(s.name)}</div><div class="ticker">${escapeHtml(s.ticker)} · ${escapeHtml(s.exchange)} · ${assetLabel(s)}</div></div><div style="text-align:right"><b>${money(s.close,s.market)}</b><div class="${cls(s.day)}">${pct(s.day)}</div></div></div><div class="stock-grid"><div class="metric"><span>1주</span><b class="${cls(s.w1)}">${pct(s.w1)}</b></div><div class="metric"><span>1개월</span><b class="${cls(s.m1)}">${pct(s.m1)}</b></div><div class="metric"><span>3개월</span><b class="${cls(s.m3)}">${pct(s.m3)}</b></div><div class="metric"><span>${sizeLabel(s)}</span><b>${compact(s.size_value,s.market)}</b></div><div class="metric"><span>거래량</span><b>${s.volume_ratio==null?'-':`${Number(s.volume_ratio).toFixed(0)}%`}</b></div><div class="metric"><span>20일선 이격</span><b class="${cls(s.gap20)}">${pct(s.gap20)}</b></div><div class="metric"><span>배열</span><b>${s.stack?'정배열':'-'}</b></div></div></article>`).join('');
 }
 async function loadMarket(market){
   state.market=market; document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.market===market)); updateMarketControls();

@@ -78,3 +78,16 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
   .freshness { margin-top: 7px; }
 }
 [hidden] { display: none !important; }
+
+.number-with-unit { display:flex; align-items:stretch; }
+.number-with-unit input { border-radius:10px 0 0 10px; min-width:0; }
+.unit-chip { display:flex; align-items:center; justify-content:center; min-width:64px; padding:0 10px; border:1px solid var(--line); border-left:0; border-radius:0 10px 10px 0; background:var(--bg); color:var(--text); font-weight:700; white-space:nowrap; }
+.cap-field small { color:var(--muted); line-height:1.35; }
+.input-error { margin-top:10px; padding:10px 12px; border:1px solid #d93636; border-radius:10px; color:#d93636; font-size:13px; font-weight:650; }
+
+.cap-quick-wrap { margin-top: 12px; }
+.cap-quick-title { color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+.cap-quick { display: flex; flex-wrap: wrap; gap: 7px; }
+.quick-cap { border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 999px; padding: 8px 11px; font-size: 12px; font-weight: 700; }
+.quick-cap:active { transform: scale(.98); }
+.clear-cap { color: var(--muted); }

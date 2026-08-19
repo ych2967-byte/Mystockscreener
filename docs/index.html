@@ -6,14 +6,14 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="theme-color" content="#1769e0">
-  <title>무료 일봉 주식 스크리너 V2</title>
+  <title>무료 일봉 주식 스크리너 V2.1.1</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main class="app">
     <header>
       <div>
-        <h1>무료 일봉 주식 스크리너 V2</h1>
+        <h1>무료 일봉 주식 스크리너 V2.1.1</h1>
         <div class="subtitle">종가 기준 · 미국 전체 일반주와 ETF 포함 · 아이폰용</div>
       </div>
       <div id="freshness" class="freshness">데이터 확인 중…</div>
@@ -54,6 +54,8 @@
             <option value="day_desc">오늘 상승률 높은 순</option>
             <option value="volume_desc">거래량 증가율 높은 순</option>
             <option value="value_desc">거래대금 높은 순</option>
+            <option value="cap_desc">시총/순자산 큰 순</option>
+            <option value="cap_asc">시총/순자산 작은 순</option>
             <option value="name_asc">종목명 가나다/ABC 순</option>
           </select>
         </label>
@@ -99,12 +101,25 @@
         <label class="field">20일 신고가까지 거리 최대(%)<input id="maxHigh20" inputmode="decimal" type="number" step="0.1" placeholder="예: 3"></label>
         <label class="field">20일선 이격률 최소(%)<input id="minGap20" inputmode="decimal" type="number" step="0.1" placeholder="예: 0"></label>
         <label class="field">20일선 이격률 최대(%)<input id="maxGap20" inputmode="decimal" type="number" step="0.1" placeholder="예: 8"></label>
+        <label class="field cap-field">시총/ETF 순자산 최소
+          <div class="number-with-unit"><input id="minCap" inputmode="decimal" type="number" min="0" step="0.1" placeholder="예: 5000"><span id="capUnitMin" class="unit-chip">억원</span></div>
+          <small id="capMinHelp">예: 5000 = 5,000억원</small>
+        </label>
+        <label class="field cap-field">시총/ETF 순자산 최대
+          <div class="number-with-unit"><input id="maxCap" inputmode="decimal" type="number" min="0" step="0.1" placeholder="비워두면 제한 없음"><span id="capUnitMax" class="unit-chip">억원</span></div>
+          <small id="capMaxHelp">예: 50000 = 5조원</small>
+        </label>
       </div>
+      <div class="cap-quick-wrap">
+        <div class="cap-quick-title">시총 최소 빠른설정</div>
+        <div id="capQuick" class="cap-quick"></div>
+      </div>
+      <div id="capError" class="input-error" hidden></div>
       <div class="actions">
         <button id="apply" class="primary">조건 적용</button>
         <button id="reset" class="secondary">초기화</button>
       </div>
-      <div class="help">상승률과 이동평균선은 마지막으로 확정된 종가를 기준으로 계산합니다. 티커 재사용·합병 등으로 하루 가격이 70% 넘게 단절된 구간은 상승률을 표시하지 않습니다. 무료 공개 데이터이므로 투자 주문 전에는 증권사 화면에서 가격을 다시 확인하세요.</div>
+      <div class="help">상승률과 이동평균선은 마지막으로 확정된 종가를 기준으로 계산합니다. 티커 재사용·합병 등으로 하루 가격이 70% 넘게 단절된 구간은 상승률을 표시하지 않습니다. 미국 ETF는 회사 시가총액 대신 순자산(AUM)을 같은 크기 기준으로 사용합니다. 무료 공개 데이터이므로 투자 주문 전에는 증권사 화면에서 가격을 다시 확인하세요.</div>
     </section>
 
     <div class="summary"><strong id="count">0종목</strong><span id="notice" class="subtitle"></span></div>
@@ -112,7 +127,7 @@
 
     <div id="tableWrap" class="table-wrap" hidden>
       <table>
-        <thead><tr><th>종목</th><th>시장</th><th>종가</th><th>오늘</th><th>1주</th><th>1개월</th><th>3개월</th><th>거래량</th><th>20일선 이격</th><th>20일 고점 거리</th><th>정배열</th></tr></thead>
+        <thead><tr><th>종목</th><th>시장</th><th>종가</th><th>시총/순자산</th><th>오늘</th><th>1주</th><th>1개월</th><th>3개월</th><th>거래량</th><th>20일선 이격</th><th>20일 고점 거리</th><th>정배열</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
