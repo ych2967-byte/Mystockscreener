@@ -471,6 +471,9 @@ def get_us_full_listing() -> list[Stock]:
 
 
 
+SIZE_CACHE_PATH = DATA_DIR / "us_sizes.json"
+
+
 def _screen_quotes(response: object) -> list[dict[str, object]]:
     if not isinstance(response, dict):
         return []
@@ -498,7 +501,7 @@ def _quote_symbol(q: dict[str, object]) -> str:
 
 def _quote_size(q: dict[str, object], is_etf: bool) -> float | None:
     keys = (
-        ("fundNetAssets", "fundnetassets", "fundnetassets.raw", "netAssets", "netassets", "totalAssets", "totalassets", "totalassets.raw", "marketCap", "intradaymarketcap", "lastclosemarketcap.lasttwelvemonths")
+        ("fundNetAssets", "fundnetassets", "netAssets", "totalAssets", "marketCap", "intradaymarketcap")
         if is_etf else
         ("marketCap", "intradaymarketcap", "marketcap", "lastclosemarketcap.lasttwelvemonths")
     )
@@ -510,128 +513,190 @@ def _quote_size(q: dict[str, object], is_etf: bool) -> float | None:
     return None
 
 
-def _flattened_row_value(row: pd.Series, wanted: tuple[str, ...]) -> float | None:
-    """yfscreen DataFrame의 raw/fmt/대소문자 차이를 흡수해 숫자 필드를 찾는다."""
-    normalized: dict[str, object] = {}
-    for key, value in row.items():
-        norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
-        normalized[norm] = value
-    for key in wanted:
-        base = re.sub(r"[^a-z0-9]", "", key.lower())
-        for candidate in (base + "raw", base, base + "longfmt", base + "fmt"):
-            if candidate in normalized:
-                parsed = _numeric_value(normalized[candidate])
-                if parsed is not None:
-                    return parsed
-    return None
-
-
-def _yfscreen_symbol(row: pd.Series) -> str:
-    for key in row.index:
-        norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
-        if norm in ("symbol", "ticker"):
-            value = row.get(key)
-            if value:
-                return str(value).strip().replace(".", "-")
-    return ""
-
-
-def get_us_size_map_yfinance() -> dict[str, float]:
-    """현재 yfinance의 공식 Screener API로 미국 일반주 시총과 ETF 규모를 수집한다.
-
-    yfinance 1.x의 공개 API(EquityQuery, ETFQuery, screen)를 사용한다.
-    한 번에 최대 250개씩 받아 offset을 이동한다.
-    """
-    size_map: dict[str, float] = {}
+def _load_us_size_cache() -> dict[str, object]:
+    """시총/AUM 캐시를 읽는다. 없으면 기존 us.json의 값으로 가능한 만큼 복구한다."""
+    cache: dict[str, object] = {
+        "version": 1,
+        "stock_offset": 0,
+        "etf_offset": 0,
+        "stock_cycle": 0,
+        "etf_cycle": 0,
+        "sizes": {},
+    }
     try:
-        from yfinance import EquityQuery, ETFQuery
+        if SIZE_CACHE_PATH.exists():
+            loaded = json.loads(SIZE_CACHE_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cache.update(loaded)
     except Exception as exc:
-        raise RuntimeError(f"yfinance Screener 도구를 불러오지 못했습니다: {exc}") from exc
+        log(f"미국 시총 캐시 읽기 실패, 새로 시작합니다: {exc}")
 
-    try:
-        version = getattr(yf, "__version__", "unknown")
-        log(f"yfinance 버전: {version}")
-    except Exception:
-        pass
+    if not isinstance(cache.get("sizes"), dict):
+        cache["sizes"] = {}
+    sizes: dict[str, object] = cache["sizes"]  # type: ignore[assignment]
 
-    query_specs = (
-        (EquityQuery, "일반주", False),
-        (ETFQuery, "ETF", True),
-    )
+    # 예전 us.json 안에 이미 받은 시총이 있다면 캐시의 씨앗으로 사용
+    old = existing_payload(DATA_DIR / "us.json")
+    if isinstance(old, dict):
+        for row in old.get("stocks", []) if isinstance(old.get("stocks"), list) else []:
+            if not isinstance(row, dict):
+                continue
+            ticker = str(row.get("ticker") or "").strip()
+            value = _numeric_value(row.get("size_value"))
+            if ticker and value is not None and ticker not in sizes:
+                sizes[ticker] = {
+                    "value": value,
+                    "kind": row.get("size_kind") or "market_cap",
+                    "updated_at": old.get("updated_at"),
+                }
+    return cache
 
-    for query_cls, label, is_etf in query_specs:
-        query = query_cls("eq", ["region", "us"])
-        offset = 0
-        seen: set[str] = set()
-        empty_streak = 0
-        while offset < 20000:
+
+def _save_us_size_cache(cache: dict[str, object]) -> None:
+    cache["updated_at"] = datetime.now(timezone.utc).isoformat()
+    tmp = SIZE_CACHE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    tmp.replace(SIZE_CACHE_PATH)
+
+
+def _rate_limited(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "too many requests" in text or "rate limit" in text or "ratelimit" in text or "429" in text
+
+
+def _screen_page(query: object, offset: int, is_etf: bool) -> list[dict[str, object]]:
+    """Yahoo Screener 한 페이지만 천천히 조회한다. Rate limit은 기다렸다가 1번 더 시도."""
+    sort_field = "fundnetassets" if is_etf else "intradaymarketcap"
+    waits = (0, 45)
+    last: Exception | None = None
+    for attempt, wait in enumerate(waits, start=1):
+        if wait:
+            log(f"Yahoo 요청 제한 가능성: {wait}초 기다린 뒤 재시도합니다.")
+            time.sleep(wait)
+        try:
             try:
                 response = yf.screen(
                     query,
                     offset=offset,
                     size=250,
-                    sortField="ticker",
-                    sortAsc=True,
+                    sortField=sort_field,
+                    sortAsc=False,
                 )
             except TypeError:
-                # 일부 1.x 빌드에서 sortField='ticker'를 거절하면 정렬 옵션 없이 재시도
                 response = yf.screen(query, offset=offset, size=250)
-            quotes = _screen_quotes(response)
-            if not quotes:
-                empty_streak += 1
-                if empty_streak >= 2:
-                    break
-                offset += 250
-                time.sleep(0.5)
-                continue
-            empty_streak = 0
+            return _screen_quotes(response)
+        except Exception as exc:
+            last = exc
+            if not _rate_limited(exc):
+                raise
+            log(f"Yahoo 시총 요청 제한 ({attempt}/{len(waits)}): {exc}")
+    if last is not None:
+        raise last
+    return []
 
-            page_new = 0
-            page_sizes = 0
+
+def refresh_us_sizes_incremental(stocks: list[Stock], pages_per_type: int = 1) -> dict[str, float]:
+    """미국 시총/AUM을 매번 전부 받지 않고 조금씩 누적한다.
+
+    - 일반주 250개 + ETF 250개(기본값)를 한 실행에서 갱신
+    - 다음 실행은 저장된 offset 다음 페이지부터 이어서 진행
+    - Rate limit이면 기존 캐시를 보존하고 가격 갱신은 계속 진행
+    """
+    cache = _load_us_size_cache()
+    sizes_obj = cache.get("sizes")
+    assert isinstance(sizes_obj, dict)
+    now = datetime.now(timezone.utc).isoformat()
+
+    try:
+        from yfinance import EquityQuery, ETFQuery
+    except Exception as exc:
+        log(f"yfinance Screener 도구를 불러오지 못해 기존 시총 캐시만 사용합니다: {exc}")
+        _save_us_size_cache(cache)
+        return {
+            t: float(v.get("value"))
+            for t, v in sizes_obj.items()
+            if isinstance(v, dict) and _numeric_value(v.get("value")) is not None
+        }
+
+    valid_by_type = {
+        False: {s.ticker for s in stocks if s.asset_type == "stock"},
+        True: {s.ticker for s in stocks if s.asset_type == "etf"},
+    }
+
+    for query_cls, label, is_etf, offset_key, cycle_key in (
+        (EquityQuery, "일반주", False, "stock_offset", "stock_cycle"),
+        (ETFQuery, "ETF", True, "etf_offset", "etf_cycle"),
+    ):
+        query = query_cls("eq", ["region", "us"])
+        offset = int(cache.get(offset_key, 0) or 0)
+        for page_no in range(max(1, pages_per_type)):
+            try:
+                quotes = _screen_page(query, offset, is_etf)
+            except Exception as exc:
+                if _rate_limited(exc):
+                    log(f"{label} 시총/AUM은 이번 실행에서 건너뜁니다. 기존 캐시는 유지됩니다: {exc}")
+                    break
+                log(f"{label} 시총/AUM 페이지 실패, 기존 캐시는 유지됩니다: {exc}")
+                break
+
+            if not quotes:
+                # 끝까지 왔거나 일시 빈 응답이면 다음 실행은 처음부터 다시 순환
+                cache[offset_key] = 0
+                cache[cycle_key] = int(cache.get(cycle_key, 0) or 0) + 1
+                log(f"{label} 시총/AUM 한 바퀴 완료. 다음 실행부터 처음 페이지를 다시 갱신합니다.")
+                break
+
+            added = 0
             for q in quotes:
-                symbol = _quote_symbol(q)
-                if not symbol or symbol in seen:
+                ticker = _quote_symbol(q)
+                if not ticker or ticker not in valid_by_type[is_etf]:
                     continue
-                seen.add(symbol)
-                page_new += 1
                 value = _quote_size(q, is_etf)
-                if value is not None:
-                    # ETF는 Yahoo가 fundNetAssets/netAssets/totalAssets를 주면 AUM,
-                    # 그렇지 않고 marketCap만 주면 규모의 예비값으로 저장한다.
-                    size_map[symbol] = value
-                    page_sizes += 1
+                if value is None:
+                    continue
+                sizes_obj[ticker] = {
+                    "value": value,
+                    "kind": "aum" if is_etf else "market_cap",
+                    "updated_at": now,
+                }
+                added += 1
 
             log(
-                f"yfinance {label} {offset + 1:,}~{offset + len(quotes):,}: "
-                f"신규 {page_new:,}개 / 규모값 {page_sizes:,}개"
+                f"{label} 시총/AUM 분할 수집 {offset + 1:,}~{offset + len(quotes):,}: "
+                f"이번 페이지 {added:,}개 저장"
             )
-            if len(quotes) < 250 or page_new == 0:
+            if len(quotes) < 250:
+                cache[offset_key] = 0
+                cache[cycle_key] = int(cache.get(cycle_key, 0) or 0) + 1
                 break
             offset += len(quotes)
-            time.sleep(0.4)
+            cache[offset_key] = offset
+            # 한 요청 뒤 바로 다음 Yahoo 요청을 보내지 않도록 간격을 둔다.
+            time.sleep(8)
 
-        log(f"yfinance {label} Screener 완료: 종목 {len(seen):,}개")
+    # 상장폐지/티커 변경으로 목록에서 사라진 오래된 캐시는 당장 지우지 않는다.
+    _save_us_size_cache(cache)
 
-    log(f"미국 시총/ETF 순자산 최종 확보: {len(size_map):,}개")
-    return size_map
-
-
-def get_us_size_map() -> dict[str, float]:
-    return get_us_size_map_yfinance()
+    result: dict[str, float] = {}
+    for ticker, item in sizes_obj.items():
+        if not isinstance(item, dict):
+            continue
+        value = _numeric_value(item.get("value"))
+        if value is not None:
+            result[str(ticker)] = value
+    log(f"누적 시총/AUM 캐시: {len(result):,}개")
+    return result
 
 
 def attach_us_sizes(stocks: list[Stock]) -> list[Stock]:
-    size_map = get_us_size_map()
+    size_map = refresh_us_sizes_incremental(stocks, pages_per_type=1)
     stock_total = sum(1 for s in stocks if s.asset_type == "stock")
     etf_total = sum(1 for s in stocks if s.asset_type == "etf")
     stock_hit = sum(1 for s in stocks if s.asset_type == "stock" and s.ticker in size_map)
     etf_hit = sum(1 for s in stocks if s.asset_type == "etf" and s.ticker in size_map)
-    log(f"시총 커버리지 일반주 {stock_hit:,}/{stock_total:,}, ETF {etf_hit:,}/{etf_total:,}")
-    if stock_hit < 1000:
-        raise RuntimeError(
-            f"미국 일반주 시총 데이터가 너무 적습니다: {stock_hit:,}/{stock_total:,}. "
-            "시총이 전부 '-'로 저장되는 것을 막기 위해 이번 갱신을 중단합니다."
-        )
+    log(f"누적 시총 커버리지 일반주 {stock_hit:,}/{stock_total:,}, ETF {etf_hit:,}/{etf_total:,}")
+    if stock_hit == 0 and etf_hit == 0:
+        log("시총/AUM 캐시가 아직 비어 있습니다. 가격 데이터는 정상 갱신하고 시총은 다음 실행에서 계속 보충합니다.")
     return [replace(stock, size_value=size_map.get(stock.ticker)) for stock in stocks]
 
 def get_us_listing() -> list[Stock]:
