@@ -498,7 +498,7 @@ def _quote_symbol(q: dict[str, object]) -> str:
 
 def _quote_size(q: dict[str, object], is_etf: bool) -> float | None:
     keys = (
-        ("fundNetAssets", "fundnetassets", "netAssets", "totalAssets", "marketCap", "intradaymarketcap")
+        ("fundNetAssets", "fundnetassets", "netAssets", "netassets", "totalAssets", "totalassets", "marketCap", "intradaymarketcap")
         if is_etf else
         ("marketCap", "intradaymarketcap", "marketcap")
     )
@@ -510,13 +510,86 @@ def _quote_size(q: dict[str, object], is_etf: bool) -> float | None:
     return None
 
 
-def get_us_size_map() -> dict[str, float]:
-    """Yahoo 스크리너를 페이지 단위로 조회해 미국 주식 시총/ETF 순자산(AUM)을 모은다."""
+def _flattened_row_value(row: pd.Series, wanted: tuple[str, ...]) -> float | None:
+    """yfscreen DataFrame의 raw/fmt/대소문자 차이를 흡수해 숫자 필드를 찾는다."""
+    normalized: dict[str, object] = {}
+    for key, value in row.items():
+        norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        normalized[norm] = value
+    for key in wanted:
+        base = re.sub(r"[^a-z0-9]", "", key.lower())
+        for candidate in (base + "raw", base, base + "longfmt", base + "fmt"):
+            if candidate in normalized:
+                parsed = _numeric_value(normalized[candidate])
+                if parsed is not None:
+                    return parsed
+    return None
+
+
+def _yfscreen_symbol(row: pd.Series) -> str:
+    for key in row.index:
+        norm = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        if norm in ("symbol", "ticker"):
+            value = row.get(key)
+            if value:
+                return str(value).strip().replace(".", "-")
+    return ""
+
+
+def get_us_size_map_yfscreen() -> dict[str, float]:
+    """yfscreen으로 미국 일반주 시총과 ETF 순자산을 가져온다.
+
+    yfinance의 screen pagination이 환경에 따라 비어버리는 문제를 피하기 위해
+    Yahoo screener의 세션/crumb/POST/pagination을 전담하는 yfscreen을 1순위로 사용한다.
+    """
+    size_map: dict[str, float] = {}
+    try:
+        import yfscreen as yfs
+    except Exception as exc:
+        log(f"yfscreen을 불러오지 못했습니다: {exc}")
+        return size_map
+
+    for sec_type, label, is_etf in (("equity", "일반주", False), ("etf", "ETF", True)):
+        try:
+            query = yfs.create_query([["eq", ["region", "us"]]])
+            payload = yfs.create_payload(sec_type, query)
+            data = yfs.get_data(payload)
+            if data is None:
+                log(f"yfscreen {label}: 응답 없음")
+                continue
+            if not isinstance(data, pd.DataFrame):
+                data = pd.DataFrame(data)
+            if data.empty:
+                log(f"yfscreen {label}: 0개")
+                continue
+            added = 0
+            for _, row in data.iterrows():
+                symbol = _yfscreen_symbol(row)
+                if not symbol:
+                    continue
+                if is_etf:
+                    value = _flattened_row_value(
+                        row,
+                        ("fundNetAssets", "fundnetassets", "netAssets", "netassets", "totalAssets", "totalassets", "intradaymarketcap", "marketCap"),
+                    )
+                else:
+                    value = _flattened_row_value(row, ("intradaymarketcap", "marketCap", "marketcap"))
+                if value is not None:
+                    size_map[symbol] = value
+                    added += 1
+            log(f"yfscreen {label} 시총/규모: {added:,}개 확보 (조회 행 {len(data):,}개)")
+        except Exception as exc:
+            log(f"yfscreen {label} 시총/규모 조회 실패: {exc}")
+    return size_map
+
+
+def get_us_size_map_yfinance() -> dict[str, float]:
+    """예비 경로: yfinance.screen으로 시총/ETF 순자산을 모은다."""
     size_map: dict[str, float] = {}
     try:
         from yfinance import EquityQuery, ETFQuery
     except Exception as exc:
-        log(f"미국 시총 도구를 불러오지 못했습니다: {exc}")
+        log(f"미국 시총 예비도구를 불러오지 못했습니다: {exc}")
         return size_map
 
     for query_cls, label, is_etf in ((EquityQuery, "일반주", False), (ETFQuery, "ETF", True)):
@@ -539,23 +612,41 @@ def get_us_size_map() -> dict[str, float]:
                     if value is not None:
                         size_map[symbol] = value
                     added += 1
-                log(f"미국 {label} 시총/규모 {offset + 1}~{offset + len(quotes)} 조회")
+                log(f"yfinance 예비 {label} {offset + 1}~{offset + len(quotes)} 조회")
                 if len(quotes) < 250 or added == 0:
                     break
                 offset += len(quotes)
                 time.sleep(0.35)
         except Exception as exc:
-            log(f"미국 {label} 시총/규모 조회 실패: {exc}")
-    log(f"미국 시총/ETF 순자산 확보: {len(size_map):,}개")
+            log(f"yfinance 예비 {label} 시총/규모 조회 실패: {exc}")
     return size_map
+
+
+def get_us_size_map() -> dict[str, float]:
+    primary = get_us_size_map_yfscreen()
+    # 1,000개도 못 얻었으면 yfinance 예비 경로를 합친다. '전부 -' 상태를 조용히 통과시키지 않는다.
+    if len(primary) < 1000:
+        log(f"yfscreen 확보값이 {len(primary):,}개뿐이라 yfinance 예비 경로를 시도합니다.")
+        fallback = get_us_size_map_yfinance()
+        for symbol, value in fallback.items():
+            primary.setdefault(symbol, value)
+    log(f"미국 시총/ETF 순자산 최종 확보: {len(primary):,}개")
+    return primary
 
 
 def attach_us_sizes(stocks: list[Stock]) -> list[Stock]:
     size_map = get_us_size_map()
-    if not size_map:
-        return stocks
+    stock_total = sum(1 for s in stocks if s.asset_type == "stock")
+    etf_total = sum(1 for s in stocks if s.asset_type == "etf")
+    stock_hit = sum(1 for s in stocks if s.asset_type == "stock" and s.ticker in size_map)
+    etf_hit = sum(1 for s in stocks if s.asset_type == "etf" and s.ticker in size_map)
+    log(f"시총 커버리지 일반주 {stock_hit:,}/{stock_total:,}, ETF {etf_hit:,}/{etf_total:,}")
+    if stock_hit < 1000:
+        raise RuntimeError(
+            f"미국 일반주 시총 데이터가 너무 적습니다: {stock_hit:,}/{stock_total:,}. "
+            "시총이 전부 '-'로 저장되는 것을 막기 위해 이번 갱신을 중단합니다."
+        )
     return [replace(stock, size_value=size_map.get(stock.ticker)) for stock in stocks]
-
 
 def get_us_listing() -> list[Stock]:
     return attach_us_sizes(get_us_full_listing())
