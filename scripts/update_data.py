@@ -12,7 +12,7 @@ import math
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -46,6 +46,7 @@ class Stock:
     asset_type: str = "stock"
     leveraged: bool = False
     inverse: bool = False
+    size_value: float | None = None
 
 
 def log(message: str) -> None:
@@ -125,6 +126,56 @@ def _row_name(row: dict[str, object], code: str) -> str:
     return code
 
 
+
+def _numeric_value(value: object) -> float | None:
+    """숫자/문자/네이버 {rawValue: ...} 형태를 가능한 범위에서 숫자로 변환."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in ("rawValue", "value", "amount", "marketValue", "marketSum", "marketCap"):
+            if key in value:
+                parsed = _numeric_value(value.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
+    text = str(value).strip().replace(",", "")
+    if not text or text.lower() in ("nan", "none", "-"):
+        return None
+    # '123.4조', '5,600억' 같은 표기도 처리
+    m = re.search(r"(-?[0-9]+(?:\.[0-9]+)?)\s*(조|억|만)?", text)
+    if not m:
+        return None
+    number = float(m.group(1))
+    unit = m.group(2)
+    if unit == "조": number *= 1e12
+    elif unit == "억": number *= 1e8
+    elif unit == "만": number *= 1e4
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _extract_kr_market_cap(row: dict[str, object]) -> float | None:
+    """네이버 종목 목록 행에서 시가총액(원)을 찾는다. 필드명이 바뀌어도 후보를 넓게 본다."""
+    preferred_keys = (
+        "marketValue", "marketSum", "marketCap", "marketCapitalization",
+        "marketValueRaw", "marketSumRaw", "marketCapRaw",
+    )
+    for key in preferred_keys:
+        if key in row:
+            parsed = _numeric_value(row.get(key))
+            if parsed is not None:
+                return parsed
+    # summary 같은 중첩 객체 안도 확인
+    for key, value in row.items():
+        key_l = str(key).lower()
+        if any(token in key_l for token in ("marketvalue", "marketsum", "marketcap")):
+            parsed = _numeric_value(value)
+            if parsed is not None:
+                return parsed
+    return None
+
 def get_kr_listing_naver() -> list[Stock]:
     """새 네이버증권의 공개 읽기 전용 목록 API를 사용한다."""
     stocks: list[Stock] = []
@@ -165,6 +216,7 @@ def get_kr_listing_naver() -> list[Stock]:
                         market="KR",
                         preferred=is_preferred_kr(name),
                         spac="스팩" in name,
+                        size_value=_extract_kr_market_cap(row),
                     )
                 )
                 added += 1
@@ -418,8 +470,95 @@ def get_us_full_listing() -> list[Stock]:
     return sorted(stocks.values(), key=lambda x: x.ticker)
 
 
+
+def _screen_quotes(response: object) -> list[dict[str, object]]:
+    if not isinstance(response, dict):
+        return []
+    for key in ("quotes", "results"):
+        value = response.get(key)
+        if isinstance(value, list):
+            return [x for x in value if isinstance(x, dict)]
+    finance = response.get("finance")
+    if isinstance(finance, dict):
+        result = finance.get("result")
+        if isinstance(result, list) and result:
+            item = result[0]
+            if isinstance(item, dict) and isinstance(item.get("quotes"), list):
+                return [x for x in item["quotes"] if isinstance(x, dict)]
+    return []
+
+
+def _quote_symbol(q: dict[str, object]) -> str:
+    for key in ("symbol", "ticker"):
+        value = q.get(key)
+        if value:
+            return str(value).strip().replace(".", "-")
+    return ""
+
+
+def _quote_size(q: dict[str, object], is_etf: bool) -> float | None:
+    keys = (
+        ("fundNetAssets", "fundnetassets", "netAssets", "totalAssets", "marketCap", "intradaymarketcap")
+        if is_etf else
+        ("marketCap", "intradaymarketcap", "marketcap")
+    )
+    for key in keys:
+        if key in q:
+            parsed = _numeric_value(q.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def get_us_size_map() -> dict[str, float]:
+    """Yahoo 스크리너를 페이지 단위로 조회해 미국 주식 시총/ETF 순자산(AUM)을 모은다."""
+    size_map: dict[str, float] = {}
+    try:
+        from yfinance import EquityQuery, ETFQuery
+    except Exception as exc:
+        log(f"미국 시총 도구를 불러오지 못했습니다: {exc}")
+        return size_map
+
+    for query_cls, label, is_etf in ((EquityQuery, "일반주", False), (ETFQuery, "ETF", True)):
+        try:
+            query = query_cls("eq", ["region", "us"])
+            offset = 0
+            seen: set[str] = set()
+            while offset < 20000:
+                response = yf.screen(query, offset=offset, size=250, sortField="ticker", sortAsc=True)
+                quotes = _screen_quotes(response)
+                if not quotes:
+                    break
+                added = 0
+                for q in quotes:
+                    symbol = _quote_symbol(q)
+                    if not symbol or symbol in seen:
+                        continue
+                    seen.add(symbol)
+                    value = _quote_size(q, is_etf)
+                    if value is not None:
+                        size_map[symbol] = value
+                    added += 1
+                log(f"미국 {label} 시총/규모 {offset + 1}~{offset + len(quotes)} 조회")
+                if len(quotes) < 250 or added == 0:
+                    break
+                offset += len(quotes)
+                time.sleep(0.35)
+        except Exception as exc:
+            log(f"미국 {label} 시총/규모 조회 실패: {exc}")
+    log(f"미국 시총/ETF 순자산 확보: {len(size_map):,}개")
+    return size_map
+
+
+def attach_us_sizes(stocks: list[Stock]) -> list[Stock]:
+    size_map = get_us_size_map()
+    if not size_map:
+        return stocks
+    return [replace(stock, size_value=size_map.get(stock.ticker)) for stock in stocks]
+
+
 def get_us_listing() -> list[Stock]:
-    return get_us_full_listing()
+    return attach_us_sizes(get_us_full_listing())
 
 
 def chunks(items: list[Stock], size: int) -> Iterable[list[Stock]]:
@@ -500,6 +639,8 @@ def compute(stock: Stock, history: pd.DataFrame) -> dict[str, object] | None:
         "asset_type": stock.asset_type,
         "leveraged": stock.leveraged,
         "inverse": stock.inverse,
+        "size_value": finite(stock.size_value, 0),
+        "size_kind": "aum" if stock.asset_type == "etf" else "market_cap",
         "date": close.index[-1].strftime("%Y-%m-%d"),
         "close": finite(latest, 3),
         "day": trailing_return(close, 1),
