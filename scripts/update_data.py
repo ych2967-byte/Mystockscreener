@@ -47,6 +47,7 @@ class Stock:
     leveraged: bool = False
     inverse: bool = False
     size_value: float | None = None
+    size_date: str | None = None
 
 
 def log(message: str) -> None:
@@ -474,53 +475,12 @@ def get_us_full_listing() -> list[Stock]:
 SIZE_CACHE_PATH = DATA_DIR / "us_sizes.json"
 
 
-def _screen_quotes(response: object) -> list[dict[str, object]]:
-    if not isinstance(response, dict):
-        return []
-    for key in ("quotes", "results"):
-        value = response.get(key)
-        if isinstance(value, list):
-            return [x for x in value if isinstance(x, dict)]
-    finance = response.get("finance")
-    if isinstance(finance, dict):
-        result = finance.get("result")
-        if isinstance(result, list) and result:
-            item = result[0]
-            if isinstance(item, dict) and isinstance(item.get("quotes"), list):
-                return [x for x in item["quotes"] if isinstance(x, dict)]
-    return []
-
-
-def _quote_symbol(q: dict[str, object]) -> str:
-    for key in ("symbol", "ticker"):
-        value = q.get(key)
-        if value:
-            return str(value).strip().replace(".", "-")
-    return ""
-
-
-def _quote_size(q: dict[str, object], is_etf: bool) -> float | None:
-    keys = (
-        ("fundNetAssets", "fundnetassets", "netAssets", "totalAssets", "marketCap", "intradaymarketcap")
-        if is_etf else
-        ("marketCap", "intradaymarketcap", "marketcap", "lastclosemarketcap.lasttwelvemonths")
-    )
-    for key in keys:
-        if key in q:
-            parsed = _numeric_value(q.get(key))
-            if parsed is not None:
-                return parsed
-    return None
-
-
 def _load_us_size_cache() -> dict[str, object]:
-    """시총/AUM 캐시를 읽는다. 없으면 기존 us.json의 값으로 가능한 만큼 복구한다."""
+    """미국 일반주 시총 캐시를 읽고, 기존 us.json 값도 가능한 만큼 복구한다."""
     cache: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "stock_offset": 0,
-        "etf_offset": 0,
         "stock_cycle": 0,
-        "etf_cycle": 0,
         "sizes": {},
     }
     try:
@@ -547,8 +507,9 @@ def _load_us_size_cache() -> dict[str, object]:
                 sizes[ticker] = {
                     "value": value,
                     "kind": row.get("size_kind") or "market_cap",
-                    "updated_at": old.get("updated_at"),
+                    "updated_at": row.get("size_date") or old.get("updated_at"),
                 }
+    cache["version"] = 2
     return cache
 
 
@@ -559,145 +520,116 @@ def _save_us_size_cache(cache: dict[str, object]) -> None:
     tmp.replace(SIZE_CACHE_PATH)
 
 
-def _rate_limited(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return "too many requests" in text or "rate limit" in text or "ratelimit" in text or "429" in text
-
-
-def _screen_page(query: object, offset: int, is_etf: bool) -> list[dict[str, object]]:
-    """Yahoo Screener 한 페이지만 천천히 조회한다. Rate limit은 기다렸다가 1번 더 시도."""
-    sort_field = "fundnetassets" if is_etf else "intradaymarketcap"
-    waits = (0, 45)
+def _nasdaq_stock_page(offset: int, limit: int) -> tuple[list[dict[str, object]], int | None]:
+    """Nasdaq 공식 주식 스크리너에서 미국 일반주 시총 한 페이지를 읽는다."""
+    url = (
+        "https://api.nasdaq.com/api/screener/stocks"
+        f"?tableonly=true&limit={limit}&offset={offset}"
+    )
     last: Exception | None = None
-    for attempt, wait in enumerate(waits, start=1):
-        if wait:
-            log(f"Yahoo 요청 제한 가능성: {wait}초 기다린 뒤 재시도합니다.")
-            time.sleep(wait)
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/market-activity/stocks/screener",
+    }
+    for attempt in range(1, 4):
         try:
-            try:
-                response = yf.screen(
-                    query,
-                    offset=offset,
-                    size=250,
-                    sortField=sort_field,
-                    sortAsc=False,
-                )
-            except TypeError:
-                response = yf.screen(query, offset=offset, size=250)
-            return _screen_quotes(response)
+            response = SESSION.get(url, timeout=60, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            table = data.get("table") if isinstance(data, dict) else None
+            rows = table.get("rows") if isinstance(table, dict) else None
+            if not isinstance(rows, list):
+                raise RuntimeError("Nasdaq 응답에서 주식 목록을 찾지 못했습니다.")
+            total_raw = table.get("totalrecords") if isinstance(table, dict) else None
+            if total_raw is None and isinstance(data, dict):
+                total_raw = data.get("totalrecords")
+            total_value = _numeric_value(total_raw)
+            return [row for row in rows if isinstance(row, dict)], int(total_value) if total_value else None
         except Exception as exc:
             last = exc
-            if not _rate_limited(exc):
-                raise
-            log(f"Yahoo 시총 요청 제한 ({attempt}/{len(waits)}): {exc}")
-    if last is not None:
-        raise last
-    return []
+            log(f"Nasdaq 시총 페이지 요청 실패 ({attempt}/3): {exc}")
+            time.sleep(attempt * 3)
+    raise RuntimeError("Nasdaq 시총 페이지를 가져오지 못했습니다.") from last
 
 
-def refresh_us_sizes_incremental(stocks: list[Stock], pages_per_type: int = 1) -> dict[str, float]:
-    """미국 시총/AUM을 매번 전부 받지 않고 조금씩 누적한다.
+def refresh_us_sizes_incremental(stocks: list[Stock], batch_size: int = 500) -> dict[str, dict[str, object]]:
+    """미국 일반주 시총을 하루 500개씩 받아 캐시에 누적한다.
 
-    - 일반주 250개 + ETF 250개(기본값)를 한 실행에서 갱신
-    - 다음 실행은 저장된 offset 다음 페이지부터 이어서 진행
-    - Rate limit이면 기존 캐시를 보존하고 가격 갱신은 계속 진행
+    ETF 순자산은 수집하지 않으며 화면에는 '-'로 둔다. 다음 실행은 저장된
+    offset부터 이어지고, 마지막 페이지 뒤에는 처음으로 돌아가 최신화한다.
     """
     cache = _load_us_size_cache()
     sizes_obj = cache.get("sizes")
     assert isinstance(sizes_obj, dict)
-    now = datetime.now(timezone.utc).isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
+    valid_stocks = {s.ticker for s in stocks if s.asset_type == "stock"}
+    offset = int(cache.get("stock_offset", 0) or 0)
 
     try:
-        from yfinance import EquityQuery, ETFQuery
+        rows, total = _nasdaq_stock_page(offset, max(1, batch_size))
+        if not rows and offset:
+            offset = 0
+            rows, total = _nasdaq_stock_page(0, max(1, batch_size))
+        added = 0
+        for row in rows:
+            ticker = str(row.get("symbol") or "").strip().replace(".", "-")
+            value = _numeric_value(row.get("marketCap"))
+            if not ticker or ticker not in valid_stocks or value is None:
+                continue
+            sizes_obj[ticker] = {
+                "value": value,
+                "kind": "market_cap",
+                "updated_at": today,
+            }
+            added += 1
+        next_offset = offset + len(rows)
+        if not rows or len(rows) < batch_size or (total is not None and next_offset >= total):
+            cache["stock_offset"] = 0
+            cache["stock_cycle"] = int(cache.get("stock_cycle", 0) or 0) + 1
+        else:
+            cache["stock_offset"] = next_offset
+        log(
+            f"미국 일반주 시총 분할 수집 {offset + 1:,}~{offset + len(rows):,}: "
+            f"이번 실행 {added:,}개 저장"
+        )
     except Exception as exc:
-        log(f"yfinance Screener 도구를 불러오지 못해 기존 시총 캐시만 사용합니다: {exc}")
-        _save_us_size_cache(cache)
-        return {
-            t: float(v.get("value"))
-            for t, v in sizes_obj.items()
-            if isinstance(v, dict) and _numeric_value(v.get("value")) is not None
-        }
-
-    valid_by_type = {
-        False: {s.ticker for s in stocks if s.asset_type == "stock"},
-        True: {s.ticker for s in stocks if s.asset_type == "etf"},
-    }
-
-    for query_cls, label, is_etf, offset_key, cycle_key in (
-        (EquityQuery, "일반주", False, "stock_offset", "stock_cycle"),
-        (ETFQuery, "ETF", True, "etf_offset", "etf_cycle"),
-    ):
-        query = query_cls("eq", ["region", "us"])
-        offset = int(cache.get(offset_key, 0) or 0)
-        for page_no in range(max(1, pages_per_type)):
-            try:
-                quotes = _screen_page(query, offset, is_etf)
-            except Exception as exc:
-                if _rate_limited(exc):
-                    log(f"{label} 시총/AUM은 이번 실행에서 건너뜁니다. 기존 캐시는 유지됩니다: {exc}")
-                    break
-                log(f"{label} 시총/AUM 페이지 실패, 기존 캐시는 유지됩니다: {exc}")
-                break
-
-            if not quotes:
-                # 끝까지 왔거나 일시 빈 응답이면 다음 실행은 처음부터 다시 순환
-                cache[offset_key] = 0
-                cache[cycle_key] = int(cache.get(cycle_key, 0) or 0) + 1
-                log(f"{label} 시총/AUM 한 바퀴 완료. 다음 실행부터 처음 페이지를 다시 갱신합니다.")
-                break
-
-            added = 0
-            for q in quotes:
-                ticker = _quote_symbol(q)
-                if not ticker or ticker not in valid_by_type[is_etf]:
-                    continue
-                value = _quote_size(q, is_etf)
-                if value is None:
-                    continue
-                sizes_obj[ticker] = {
-                    "value": value,
-                    "kind": "aum" if is_etf else "market_cap",
-                    "updated_at": now,
-                }
-                added += 1
-
-            log(
-                f"{label} 시총/AUM 분할 수집 {offset + 1:,}~{offset + len(quotes):,}: "
-                f"이번 페이지 {added:,}개 저장"
-            )
-            if len(quotes) < 250:
-                cache[offset_key] = 0
-                cache[cycle_key] = int(cache.get(cycle_key, 0) or 0) + 1
-                break
-            offset += len(quotes)
-            cache[offset_key] = offset
-            # 한 요청 뒤 바로 다음 Yahoo 요청을 보내지 않도록 간격을 둔다.
-            time.sleep(8)
+        log(f"미국 시총 수집 실패, 기존 캐시를 유지합니다: {exc}")
 
     # 상장폐지/티커 변경으로 목록에서 사라진 오래된 캐시는 당장 지우지 않는다.
     _save_us_size_cache(cache)
 
-    result: dict[str, float] = {}
+    result: dict[str, dict[str, object]] = {}
     for ticker, item in sizes_obj.items():
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or str(ticker) not in valid_stocks:
             continue
         value = _numeric_value(item.get("value"))
         if value is not None:
-            result[str(ticker)] = value
-    log(f"누적 시총/AUM 캐시: {len(result):,}개")
+            result[str(ticker)] = {
+                "value": value,
+                "updated_at": str(item.get("updated_at") or "")[:10] or None,
+            }
+    log(f"누적 미국 일반주 시총 캐시: {len(result):,}개")
     return result
 
 
 def attach_us_sizes(stocks: list[Stock]) -> list[Stock]:
-    size_map = refresh_us_sizes_incremental(stocks, pages_per_type=1)
+    size_map = refresh_us_sizes_incremental(stocks, batch_size=500)
     stock_total = sum(1 for s in stocks if s.asset_type == "stock")
-    etf_total = sum(1 for s in stocks if s.asset_type == "etf")
     stock_hit = sum(1 for s in stocks if s.asset_type == "stock" and s.ticker in size_map)
-    etf_hit = sum(1 for s in stocks if s.asset_type == "etf" and s.ticker in size_map)
-    log(f"누적 시총 커버리지 일반주 {stock_hit:,}/{stock_total:,}, ETF {etf_hit:,}/{etf_total:,}")
-    if stock_hit == 0 and etf_hit == 0:
-        log("시총/AUM 캐시가 아직 비어 있습니다. 가격 데이터는 정상 갱신하고 시총은 다음 실행에서 계속 보충합니다.")
-    return [replace(stock, size_value=size_map.get(stock.ticker)) for stock in stocks]
+    log(f"누적 시총 커버리지 일반주 {stock_hit:,}/{stock_total:,} (ETF 순자산은 표시하지 않음)")
+    if stock_hit == 0:
+        log("시총 캐시가 아직 비어 있습니다. 가격 데이터는 정상 갱신하고 다음 실행에서 계속 보충합니다.")
+    return [
+        replace(
+            stock,
+            size_value=_numeric_value(size_map.get(stock.ticker, {}).get("value")),
+            size_date=str(size_map.get(stock.ticker, {}).get("updated_at") or "") or None,
+        )
+        if stock.asset_type == "stock" else stock
+        for stock in stocks
+    ]
 
 def get_us_listing() -> list[Stock]:
     return attach_us_sizes(get_us_full_listing())
@@ -783,6 +715,7 @@ def compute(stock: Stock, history: pd.DataFrame) -> dict[str, object] | None:
         "inverse": stock.inverse,
         "size_value": finite(stock.size_value, 0),
         "size_kind": "aum" if stock.asset_type == "etf" else "market_cap",
+        "size_date": stock.size_date,
         "date": close.index[-1].strftime("%Y-%m-%d"),
         "close": finite(latest, 3),
         "day": trailing_return(close, 1),
