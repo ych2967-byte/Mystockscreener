@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>NASDAQ 장기 주봉 100주/200주선</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+html,body{margin:0;background:#0b0f14;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{padding:12px}
+h1{font-size:18px;margin:4px 0 2px}
+.sub{font-size:12px;color:#9ca3af;margin-bottom:8px}
+#chart{width:100%;height:82vh;min-height:560px}
+#status{font-size:12px;color:#9ca3af;margin-top:6px}
+button{font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>NASDAQ Composite 장기 주봉</h1>
+  <div class="sub">1971년~현재 · 100주 SMA · 200주 SMA · 로그축</div>
+  <div id="chart"></div>
+  <div id="status">데이터 불러오는 중...</div>
+</div>
+
+<script>
+(async function(){
+  const status=document.getElementById('status');
+  const chart=document.getElementById('chart');
+
+  function parseCSV(t){
+    const lines=t.trim().split(/\r?\n/);
+    const out=[];
+    for(let i=1;i<lines.length;i++){
+      const p=lines[i].split(',');
+      if(p.length<2 || p[1]==='.' || p[1]==='') continue;
+      const v=Number(p[1]);
+      if(Number.isFinite(v)) out.push({date:p[0],value:v});
+    }
+    return out;
+  }
+
+  function weeklyClose(daily){
+    const out=[];
+    let wk='', last=null;
+    for(const d of daily){
+      const dt=new Date(d.date+'T00:00:00Z');
+      const day=dt.getUTCDay();
+      const mon=new Date(dt);
+      mon.setUTCDate(dt.getUTCDate()-((day+6)%7));
+      const key=mon.toISOString().slice(0,10);
+      if(wk && key!==wk && last) out.push(last);
+      wk=key; last=d;
+    }
+    if(last) out.push(last);
+    return out;
+  }
+
+  function sma(a,n){
+    const r=new Array(a.length).fill(null);
+    let sum=0;
+    for(let i=0;i<a.length;i++){
+      sum += a[i];
+      if(i>=n) sum -= a[i-n];
+      if(i>=n-1) r[i]=sum/n;
+    }
+    return r;
+  }
+
+  try{
+    const url='https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM';
+    const res=await fetch(url,{cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const daily=parseCSV(await res.text());
+    if(daily.length<1000) throw new Error('데이터가 너무 적습니다.');
+
+    const w=weeklyClose(daily);
+    const x=w.map(d=>d.date);
+    const close=w.map(d=>d.value);
+    const ma100=sma(close,100);
+    const ma200=sma(close,200);
+
+    const traces=[
+      {x:x,y:close,type:'scatter',mode:'lines',name:'NASDAQ',line:{width:1.6,color:'#e5e7eb'}},
+      {x:x,y:ma100,type:'scatter',mode:'lines',name:'100주 SMA',line:{width:2,color:'#3b82f6'}},
+      {x:x,y:ma200,type:'scatter',mode:'lines',name:'200주 SMA',line:{width:2.2,color:'#f59e0b'}}
+    ];
+
+    const layout={
+      paper_bgcolor:'#0b0f14',
+      plot_bgcolor:'#0b0f14',
+      font:{color:'#d1d5db'},
+      margin:{l:54,r:12,t:54,b:34},
+      hovermode:'x unified',
+      dragmode:'pan',
+      legend:{orientation:'h',x:0,y:1.08},
+      xaxis:{
+        type:'date',
+        gridcolor:'#1f2937',
+        rangeslider:{
+          visible:true,
+          thickness:0.14,
+          bgcolor:'#111827',
+          bordercolor:'#374151',
+          borderwidth:1
+        },
+        rangeselector:{
+          buttons:[
+            {count:5,label:'5년',step:'year',stepmode:'backward'},
+            {count:10,label:'10년',step:'year',stepmode:'backward'},
+            {count:20,label:'20년',step:'year',stepmode:'backward'},
+            {step:'all',label:'전체'}
+          ],
+          bgcolor:'#111827',
+          activecolor:'#374151',
+          font:{color:'#e5e7eb'}
+        }
+      },
+      yaxis:{
+        type:'log',
+        gridcolor:'#1f2937',
+        title:'NASDAQ Composite (로그축)'
+      }
+    };
+
+    await Plotly.newPlot(chart,traces,layout,{
+      responsive:true,
+      scrollZoom:true,
+      displaylogo:false
+    });
+
+    status.textContent='아래 막대를 드래그하면 확대·축소·좌우 이동 가능 · 차트에서도 핀치줌/드래그 가능';
+  }catch(err){
+    status.innerHTML='<b style="color:#fca5a5">데이터 로딩 실패:</b> '+err.message+
+    '<br>새로고침해도 안 되면 알려줘. 데이터 자체를 파일에 내장한 버전으로 바꿔줄게.';
+  }
+})();
+</script>
+</body>
+</html>
